@@ -1,10 +1,9 @@
-import { BaseFile, File } from '../core/file';
-import { FileSystem, BFSOneArgCallback, BFSCallback, BFSThreeArgCallback } from '../core/file_system';
-import Stats from '../core/stats';
-import { FileFlag } from '../core/file_flag';
-import { ApiError, ErrorCode } from '../core/api_error';
-import fs from '../core/node_fs';
-import { emptyBuffer } from '../core/util';
+import { BaseFile, File } from '../file';
+import { FileSystem } from '../filesystem';
+import { Stats } from '../stats';
+import { FileFlag } from '../file';
+import { ApiError, ErrorCode } from '../ApiError';
+import { getMount } from '../emulation/shared';
 import { Buffer } from 'buffer';
 
 /**
@@ -44,7 +43,7 @@ export default class PreloadFile<T extends FileSystem> extends BaseFile {
 		this._path = _path;
 		this._flag = _flag;
 		this._stat = _stat;
-		this._buffer = contents ? contents : emptyBuffer();
+		this._buffer = contents ? contents : Buffer.alloc(0);
 		// Note: This invariant is *not* maintained once the file starts getting
 		// modified.
 		// Note: Only actually matters if file is readable, as writeable modes may
@@ -117,13 +116,8 @@ export default class PreloadFile<T extends FileSystem> extends BaseFile {
 	 * class.
 	 * @param [Function(BrowserFS.ApiError)] cb
 	 */
-	public sync(cb: BFSOneArgCallback): void {
-		try {
-			this.syncSync();
-			cb();
-		} catch (e) {
-			cb(e);
-		}
+	public async sync(): Promise<void> {
+		this.syncSync();
 	}
 
 	/**
@@ -138,13 +132,8 @@ export default class PreloadFile<T extends FileSystem> extends BaseFile {
 	 * class.
 	 * @param [Function(BrowserFS.ApiError)] cb
 	 */
-	public close(cb: BFSOneArgCallback): void {
-		try {
-			this.closeSync();
-			cb();
-		} catch (e) {
-			cb(e);
-		}
+	public async close(): Promise<void> {
+		this.closeSync();
 	}
 
 	/**
@@ -158,12 +147,8 @@ export default class PreloadFile<T extends FileSystem> extends BaseFile {
 	 * Asynchronous `stat`.
 	 * @param [Function(BrowserFS.ApiError, BrowserFS.node.fs.Stats)] cb
 	 */
-	public stat(cb: BFSCallback<Stats>): void {
-		try {
-			cb(null, Stats.clone(this._stat));
-		} catch (e) {
-			cb(e);
-		}
+	public async stat(): Promise<Stats> {
+		return Stats.clone(this._stat);
 	}
 
 	/**
@@ -178,15 +163,10 @@ export default class PreloadFile<T extends FileSystem> extends BaseFile {
 	 * @param [Number] len
 	 * @param [Function(BrowserFS.ApiError)] cb
 	 */
-	public truncate(len: number, cb: BFSOneArgCallback): void {
-		try {
-			this.truncateSync(len);
-			if (this._flag.isSynchronous() && !fs.getRootFS()!.supportsSynch()) {
-				this.sync(cb);
-			}
-			cb();
-		} catch (e) {
-			return cb(e);
+	public truncate(len: number): Promise<void> {
+		this.truncateSync(len);
+		if (this._flag.isSynchronous() && !getMount('/')!.metadata.synchronous) {
+			return this.sync();
 		}
 	}
 
@@ -204,7 +184,7 @@ export default class PreloadFile<T extends FileSystem> extends BaseFile {
 			const buf = Buffer.alloc(len - this._buffer.length, 0);
 			// Write will set @_stat.size for us.
 			this.writeSync(buf, 0, buf.length, this._buffer.length);
-			if (this._flag.isSynchronous() && fs.getRootFS()!.supportsSynch()) {
+			if (this._flag.isSynchronous() && getMount('/')!.metadata.synchronous) {
 				this.syncSync();
 			}
 			return;
@@ -214,7 +194,7 @@ export default class PreloadFile<T extends FileSystem> extends BaseFile {
 		const newBuff = Buffer.alloc(len);
 		this._buffer.copy(newBuff, 0, 0, len);
 		this._buffer = newBuff;
-		if (this._flag.isSynchronous() && fs.getRootFS()!.supportsSynch()) {
+		if (this._flag.isSynchronous() && getMount('/')!.metadata.synchronous) {
 			this.syncSync();
 		}
 	}
@@ -233,12 +213,8 @@ export default class PreloadFile<T extends FileSystem> extends BaseFile {
 	 * @param [Function(BrowserFS.ApiError, Number, BrowserFS.node.Buffer)]
 	 *   cb The number specifies the number of bytes written into the file.
 	 */
-	public write(buffer: Buffer, offset: number, length: number, position: number, cb: BFSThreeArgCallback<number, Buffer>): void {
-		try {
-			cb(null, this.writeSync(buffer, offset, length, position), buffer);
-		} catch (e) {
-			cb(e);
-		}
+	public async write(buffer: Buffer, offset: number, length: number, position: number): Promise<number> {
+		return this.writeSync(buffer, offset, length, position);
 	}
 
 	/**
@@ -295,12 +271,8 @@ export default class PreloadFile<T extends FileSystem> extends BaseFile {
 	 * @param [Function(BrowserFS.ApiError, Number, BrowserFS.node.Buffer)] cb The
 	 *   number is the number of bytes read
 	 */
-	public read(buffer: Buffer, offset: number, length: number, position: number, cb: BFSThreeArgCallback<number, Buffer>): void {
-		try {
-			cb(null, this.readSync(buffer, offset, length, position), buffer);
-		} catch (e) {
-			cb(e);
-		}
+	public async read(buffer: Buffer, offset: number, length: number, position: number): Promise<{ bytesRead: number; buffer: Buffer }> {
+		return { bytesRead: this.readSync(buffer, offset, length, position), buffer };
 	}
 
 	/**
@@ -335,15 +307,9 @@ export default class PreloadFile<T extends FileSystem> extends BaseFile {
 	/**
 	 * Asynchronous `fchmod`.
 	 * @param [Number|String] mode
-	 * @param [Function(BrowserFS.ApiError)] cb
 	 */
-	public chmod(mode: number, cb: BFSOneArgCallback): void {
-		try {
-			this.chmodSync(mode);
-			cb();
-		} catch (e) {
-			cb(e);
-		}
+	public async chmod(mode: number): Promise<void> {
+		this.chmodSync(mode);
 	}
 
 	/**
@@ -351,7 +317,7 @@ export default class PreloadFile<T extends FileSystem> extends BaseFile {
 	 * @param [Number] mode
 	 */
 	public chmodSync(mode: number): void {
-		if (!this._fs.supportsProps()) {
+		if (!this._fs.metadata.supportsProperties) {
 			throw new ApiError(ErrorCode.ENOTSUP);
 		}
 		this._dirty = true;
@@ -363,15 +329,9 @@ export default class PreloadFile<T extends FileSystem> extends BaseFile {
 	 * Asynchronous `fchown`.
 	 * @param [Number] uid
 	 * @param [Number] gid
-	 * @param [Function(BrowserFS.ApiError)] cb
 	 */
-	public chown(uid: number, gid: number, cb: BFSOneArgCallback): void {
-		try {
-			this.chownSync(uid, gid);
-			cb();
-		} catch (e) {
-			cb(e);
-		}
+	public async chown(uid: number, gid: number): Promise<void> {
+		this.chownSync(uid, gid);
 	}
 
 	/**
@@ -380,7 +340,7 @@ export default class PreloadFile<T extends FileSystem> extends BaseFile {
 	 * @param [Number] gid
 	 */
 	public chownSync(uid: number, gid: number): void {
-		if (!this._fs.supportsProps()) {
+		if (!this._fs.metadata.supportsProperties) {
 			throw new ApiError(ErrorCode.ENOTSUP);
 		}
 		this._dirty = true;
@@ -412,8 +372,8 @@ export class NoSyncFile<T extends FileSystem> extends PreloadFile<T> implements 
 	 * Asynchronous sync. Doesn't do anything, simply calls the cb.
 	 * @param [Function(BrowserFS.ApiError)] cb
 	 */
-	public sync(cb: BFSOneArgCallback): void {
-		cb();
+	public async sync(): Promise<void> {
+		return;
 	}
 	/**
 	 * Synchronous sync. Doesn't do anything.
@@ -425,8 +385,8 @@ export class NoSyncFile<T extends FileSystem> extends PreloadFile<T> implements 
 	 * Asynchronous close. Doesn't do anything, simply calls the cb.
 	 * @param [Function(BrowserFS.ApiError)] cb
 	 */
-	public close(cb: BFSOneArgCallback): void {
-		cb();
+	public async close(): Promise<void> {
+		return;
 	}
 	/**
 	 * Synchronous close. Doesn't do anything.

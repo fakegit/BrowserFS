@@ -9,12 +9,10 @@
  * Adapted from Emscripten's NodeFS:
  * https://raw.github.com/kripken/emscripten/master/src/library_nodefs.js
  */
-import FS from '../core/FS';
-import fs from '../core/node_fs';
-import NodeStats from '../core/stats';
-import { uint8Array2Buffer } from '../core/util';
+import * as fs from '../emulation';
+import { Stats } from '../stats';
 
-export interface Stats {
+export interface EmscriptenStats {
 	dev: number;
 	ino: number;
 	mode: number;
@@ -31,33 +29,33 @@ export interface Stats {
 	timestamp?: number;
 }
 
-export interface EmscriptenFSNode {
+export interface EmscriptenEntry {
 	name: string;
 	mode: number;
-	parent: EmscriptenFSNode;
+	parent: EmscriptenEntry;
 	mount: { opts: { root: string } };
 	stream_ops: EmscriptenStreamOps;
-	node_ops: EmscriptenNodeOps;
+	node_ops: EmscriptenEntryOps;
 }
 
 export interface EmscriptenStream {
-	node: EmscriptenFSNode;
+	node: EmscriptenEntry;
 	nfd: any;
 	flags: string;
 	position: number;
 }
 
-export interface EmscriptenNodeOps {
-	getattr(node: EmscriptenFSNode): Stats;
-	setattr(node: EmscriptenFSNode, attr: Stats): void;
-	lookup(parent: EmscriptenFSNode, name: string): EmscriptenFSNode;
-	mknod(parent: EmscriptenFSNode, name: string, mode: number, dev: any): EmscriptenFSNode;
-	rename(oldNode: EmscriptenFSNode, newDir: EmscriptenFSNode, newName: string): void;
-	unlink(parent: EmscriptenFSNode, name: string): void;
-	rmdir(parent: EmscriptenFSNode, name: string): void;
-	readdir(node: EmscriptenFSNode): string[];
-	symlink(parent: EmscriptenFSNode, newName: string, oldPath: string): void;
-	readlink(node: EmscriptenFSNode): string;
+export interface EmscriptenEntryOps {
+	getattr(node: EmscriptenEntry): EmscriptenStats;
+	setattr(node: EmscriptenEntry, attr: EmscriptenStats): void;
+	lookup(parent: EmscriptenEntry, name: string): EmscriptenEntry;
+	mknod(parent: EmscriptenEntry, name: string, mode: number, dev: any): EmscriptenEntry;
+	rename(oldNode: EmscriptenEntry, newDir: EmscriptenEntry, newName: string): void;
+	unlink(parent: EmscriptenEntry, name: string): void;
+	rmdir(parent: EmscriptenEntry, name: string): void;
+	readdir(node: EmscriptenEntry): string[];
+	symlink(parent: EmscriptenEntry, newName: string, oldPath: string): void;
+	readlink(node: EmscriptenEntry): string;
 }
 
 export interface EmscriptenStreamOps {
@@ -69,33 +67,33 @@ export interface EmscriptenStreamOps {
 }
 
 export interface EmscriptenFS {
-	node_ops: EmscriptenNodeOps;
+	node_ops: EmscriptenEntryOps;
 	stream_ops: EmscriptenStreamOps;
-	mount(mount: { opts: { root: string } }): EmscriptenFSNode;
-	createNode(parent: EmscriptenFSNode, name: string, mode: number, dev?: any): EmscriptenFSNode;
+	mount(mount: { opts: { root: string } }): EmscriptenEntry;
+	createNode(parent: EmscriptenEntry, name: string, mode: number, dev?: any): EmscriptenEntry;
 	getMode(path: string): number;
-	realPath(node: EmscriptenFSNode): string;
+	realPath(node: EmscriptenEntry): string;
 }
 
 class BFSEmscriptenStreamOps implements EmscriptenStreamOps {
 	public PATH: any;
 	private FS: any;
 	private ERRNO_CODES: any;
-	private nodefs: FS;
+	private nodefs: typeof fs;
 
-	constructor(private fs: BFSEmscriptenFS) {
-		this.nodefs = fs.getNodeFS();
-		this.FS = fs.getFS();
-		this.PATH = fs.getPATH();
-		this.ERRNO_CODES = fs.getERRNO_CODES();
+	constructor(private efs: BFSEmscriptenFS) {
+		this.nodefs = efs.getNodeFS();
+		this.FS = efs.getFS();
+		this.PATH = efs.getPATH();
+		this.ERRNO_CODES = efs.getERRNO_CODES();
 	}
 
 	public open(stream: EmscriptenStream): void {
-		const path = this.fs.realPath(stream.node);
+		const path = this.efs.realPath(stream.node);
 		const FS = this.FS;
 		try {
 			if (FS.isFile(stream.node.mode)) {
-				stream.nfd = this.nodefs.openSync(path, this.fs.flagsToPermissionString(stream.flags));
+				stream.nfd = this.nodefs.openSync(path, this.efs.flagsToPermissionString(stream.flags));
 			}
 		} catch (e) {
 			if (!e.code) {
@@ -122,7 +120,7 @@ class BFSEmscriptenStreamOps implements EmscriptenStreamOps {
 	public read(stream: EmscriptenStream, buffer: Uint8Array, offset: number, length: number, position: number): number {
 		// Avoid copying overhead by reading directly into buffer.
 		try {
-			return this.nodefs.readSync(stream.nfd, uint8Array2Buffer(buffer), offset, length, position);
+			return this.nodefs.readSync(stream.nfd, Buffer.from(buffer), offset, length, position);
 		} catch (e) {
 			throw new this.FS.ErrnoError(this.ERRNO_CODES[e.code]);
 		}
@@ -131,7 +129,7 @@ class BFSEmscriptenStreamOps implements EmscriptenStreamOps {
 	public write(stream: EmscriptenStream, buffer: Uint8Array, offset: number, length: number, position: number): number {
 		// Avoid copying overhead.
 		try {
-			return this.nodefs.writeSync(stream.nfd, uint8Array2Buffer(buffer), offset, length, position);
+			return this.nodefs.writeSync(stream.nfd, Buffer.from(buffer), offset, length, position);
 		} catch (e) {
 			throw new this.FS.ErrnoError(this.ERRNO_CODES[e.code]);
 		}
@@ -163,22 +161,22 @@ class BFSEmscriptenStreamOps implements EmscriptenStreamOps {
 	}
 }
 
-class BFSEmscriptenNodeOps implements EmscriptenNodeOps {
+class BFSEmscriptenEntryOps implements EmscriptenEntryOps {
 	private FS: any;
 	private PATH: any;
 	private ERRNO_CODES: any;
-	private nodefs: FS;
+	private nodefs: typeof fs;
 
-	constructor(private fs: BFSEmscriptenFS) {
-		this.nodefs = fs.getNodeFS();
-		this.FS = fs.getFS();
-		this.PATH = fs.getPATH();
-		this.ERRNO_CODES = fs.getERRNO_CODES();
+	constructor(private _fs: BFSEmscriptenFS) {
+		this.nodefs = _fs.getNodeFS();
+		this.FS = _fs.getFS();
+		this.PATH = _fs.getPATH();
+		this.ERRNO_CODES = _fs.getERRNO_CODES();
 	}
 
-	public getattr(node: EmscriptenFSNode): Stats {
-		const path = this.fs.realPath(node);
-		let stat: NodeStats;
+	public getattr(node: EmscriptenEntry): EmscriptenStats {
+		const path = this._fs.realPath(node);
+		let stat: Stats;
 		try {
 			stat = this.nodefs.lstatSync(path);
 		} catch (e) {
@@ -204,8 +202,8 @@ class BFSEmscriptenNodeOps implements EmscriptenNodeOps {
 		};
 	}
 
-	public setattr(node: EmscriptenFSNode, attr: Stats): void {
-		const path = this.fs.realPath(node);
+	public setattr(node: EmscriptenEntry, attr: EmscriptenStats): void {
+		const path = this._fs.realPath(node);
 		try {
 			if (attr.mode !== undefined) {
 				this.nodefs.chmodSync(path, attr.mode);
@@ -238,16 +236,16 @@ class BFSEmscriptenNodeOps implements EmscriptenNodeOps {
 		}
 	}
 
-	public lookup(parent: EmscriptenFSNode, name: string): EmscriptenFSNode {
-		const path = this.PATH.join2(this.fs.realPath(parent), name);
-		const mode = this.fs.getMode(path);
-		return this.fs.createNode(parent, name, mode);
+	public lookup(parent: EmscriptenEntry, name: string): EmscriptenEntry {
+		const path = this.PATH.join2(this._fs.realPath(parent), name);
+		const mode = this._fs.getMode(path);
+		return this._fs.createNode(parent, name, mode);
 	}
 
-	public mknod(parent: EmscriptenFSNode, name: string, mode: number, dev: any): EmscriptenFSNode {
-		const node = this.fs.createNode(parent, name, mode, dev);
+	public mknod(parent: EmscriptenEntry, name: string, mode: number, dev: any): EmscriptenEntry {
+		const node = this._fs.createNode(parent, name, mode, dev);
 		// create the backing node for this in the fs root as well
-		const path = this.fs.realPath(node);
+		const path = this._fs.realPath(node);
 		try {
 			if (this.FS.isDir(node.mode)) {
 				this.nodefs.mkdirSync(path, node.mode);
@@ -263,9 +261,9 @@ class BFSEmscriptenNodeOps implements EmscriptenNodeOps {
 		return node;
 	}
 
-	public rename(oldNode: EmscriptenFSNode, newDir: EmscriptenFSNode, newName: string): void {
-		const oldPath = this.fs.realPath(oldNode);
-		const newPath = this.PATH.join2(this.fs.realPath(newDir), newName);
+	public rename(oldNode: EmscriptenEntry, newDir: EmscriptenEntry, newName: string): void {
+		const oldPath = this._fs.realPath(oldNode);
+		const newPath = this.PATH.join2(this._fs.realPath(newDir), newName);
 		try {
 			this.nodefs.renameSync(oldPath, newPath);
 			// This logic is missing from the original NodeFS,
@@ -280,8 +278,8 @@ class BFSEmscriptenNodeOps implements EmscriptenNodeOps {
 		}
 	}
 
-	public unlink(parent: EmscriptenFSNode, name: string): void {
-		const path = this.PATH.join2(this.fs.realPath(parent), name);
+	public unlink(parent: EmscriptenEntry, name: string): void {
+		const path = this.PATH.join2(this._fs.realPath(parent), name);
 		try {
 			this.nodefs.unlinkSync(path);
 		} catch (e) {
@@ -292,8 +290,8 @@ class BFSEmscriptenNodeOps implements EmscriptenNodeOps {
 		}
 	}
 
-	public rmdir(parent: EmscriptenFSNode, name: string) {
-		const path = this.PATH.join2(this.fs.realPath(parent), name);
+	public rmdir(parent: EmscriptenEntry, name: string) {
+		const path = this.PATH.join2(this._fs.realPath(parent), name);
 		try {
 			this.nodefs.rmdirSync(path);
 		} catch (e) {
@@ -304,8 +302,8 @@ class BFSEmscriptenNodeOps implements EmscriptenNodeOps {
 		}
 	}
 
-	public readdir(node: EmscriptenFSNode): string[] {
-		const path = this.fs.realPath(node);
+	public readdir(node: EmscriptenEntry): string[] {
+		const path = this._fs.realPath(node);
 		try {
 			// Node does not list . and .. in directory listings,
 			// but Emscripten expects it.
@@ -320,8 +318,8 @@ class BFSEmscriptenNodeOps implements EmscriptenNodeOps {
 		}
 	}
 
-	public symlink(parent: EmscriptenFSNode, newName: string, oldPath: string): void {
-		const newPath = this.PATH.join2(this.fs.realPath(parent), newName);
+	public symlink(parent: EmscriptenEntry, newName: string, oldPath: string): void {
+		const newPath = this.PATH.join2(this._fs.realPath(parent), newName);
 		try {
 			this.nodefs.symlinkSync(oldPath, newPath);
 		} catch (e) {
@@ -332,8 +330,8 @@ class BFSEmscriptenNodeOps implements EmscriptenNodeOps {
 		}
 	}
 
-	public readlink(node: EmscriptenFSNode): string {
-		const path = this.fs.realPath(node);
+	public readlink(node: EmscriptenEntry): string {
+		const path = this._fs.realPath(node);
 		try {
 			return this.nodefs.readlinkSync(path);
 		} catch (e) {
@@ -375,28 +373,28 @@ export default class BFSEmscriptenFS implements EmscriptenFS {
 		4098 /*O_RDWR|O_DSYNC*/: 'rs+',
 	};
 	/* tslint:disable:variable-name */
-	public node_ops: EmscriptenNodeOps;
+	public node_ops: EmscriptenEntryOps;
 	public stream_ops: EmscriptenStreamOps;
 	/* tslint:enable:variable-name */
 
 	private FS: any;
 	private PATH: any;
 	private ERRNO_CODES: any;
-	private nodefs: FS;
-	constructor(_FS = (<any>self)['FS'], _PATH = (<any>self)['PATH'], _ERRNO_CODES = (<any>self)['ERRNO_CODES'], nodefs: FS = fs) {
+	private nodefs: typeof fs;
+	constructor(_FS = (<any>globalThis)['FS'], _PATH = (<any>globalThis)['PATH'], _ERRNO_CODES = (<any>globalThis)['ERRNO_CODES'], nodefs: typeof fs = fs) {
 		this.nodefs = nodefs;
 		this.FS = _FS;
 		this.PATH = _PATH;
 		this.ERRNO_CODES = _ERRNO_CODES;
-		this.node_ops = new BFSEmscriptenNodeOps(this);
+		this.node_ops = new BFSEmscriptenEntryOps(this);
 		this.stream_ops = new BFSEmscriptenStreamOps(this);
 	}
 
-	public mount(m: { opts: { root: string } }): EmscriptenFSNode {
+	public mount(m: { opts: { root: string } }): EmscriptenEntry {
 		return this.createNode(null, '/', this.getMode(m.opts.root), 0);
 	}
 
-	public createNode(parent: EmscriptenFSNode | null, name: string, mode: number, dev?: any): EmscriptenFSNode {
+	public createNode(parent: EmscriptenEntry | null, name: string, mode: number, dev?: any): EmscriptenEntry {
 		const FS = this.FS;
 		if (!FS.isDir(mode) && !FS.isFile(mode) && !FS.isLink(mode)) {
 			throw new FS.ErrnoError(this.ERRNO_CODES.EINVAL);
@@ -408,7 +406,7 @@ export default class BFSEmscriptenFS implements EmscriptenFS {
 	}
 
 	public getMode(path: string): number {
-		let stat: NodeStats;
+		let stat: Stats;
 		try {
 			stat = this.nodefs.lstatSync(path);
 		} catch (e) {
@@ -420,7 +418,7 @@ export default class BFSEmscriptenFS implements EmscriptenFS {
 		return stat.mode;
 	}
 
-	public realPath(node: EmscriptenFSNode): string {
+	public realPath(node: EmscriptenEntry): string {
 		const parts: string[] = [];
 		while (node.parent !== node) {
 			parts.push(node.name);
